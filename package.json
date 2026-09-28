@@ -1,0 +1,17 @@
+{
+  "name": "orb3-wasm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ORBy things",
+  "type": "module",
+  "scripts": {
+    "serve": "python3 -m http.server 8090",
+    "build:popcnt": "asc src/popcnt.ts --outFile build/popcnt.wasm --optimize",
+    "verify": "node verify.mjs",
+    "verify:browser": "node verify-browser.mjs"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.2",
+    "opencv-wasm": "^4.3.0-10"
+  }
+}

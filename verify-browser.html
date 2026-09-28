@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ORB OpenCV.js browser verification</title>
+</head>
+<body>
+  <!-- Headless-Chrome harness: exercises demo/orb-opencv.mjs exactly as the
+       demos do (script injection from node_modules, staging, cv.ORB run), the
+       popcnt.wasm matching path over HTTP, and the real ImageDecoder pipeline
+       on a test image. Prints the outcome into the DOM + title. Served over
+       http://localhost:8090 (npm run serve), then: npm run verify:browser -->
+  <p id="probe">running…</p>
+  <script type="module">
+    import { loadOrb } from './demo/orb-opencv.mjs';
+    import { scanPair as scanPairJS, makeWasmScanPair } from './demo/similarity-core.mjs';
+
+    const out = [];
+    const report = (k, v) => out.push(`${k}: ${v}`);
+
+    // OpenCV's BGR2GRAY rounding formula applied to sRGB (R, G, B) — same as the demos.
+    function rgbaToGray(img) {
+      const w = img.width;
+      const h = img.height;
+      const off = new OffscreenCanvas(w, h);
+      const octx = off.getContext('2d', { willReadFrequently: true });
+      octx.drawImage(img, 0, 0);
+      const { data } = octx.getImageData(0, 0, w, h);
+      const gray = new Uint8Array(w * h);
+      for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+        gray[i] = (114 * data[p + 2] + 587 * data[p + 1] + 299 * data[p] + 500) / 1000 | 0;
+      }
+      return { gray, w, h };
+    }
+
+    try {
+      const orb = await loadOrb();
+      report('cv.loaded', true);
+
+      // 1. synthetic gray through the adapter
+      {
+        const w = 320, h = 240;
+        const gray = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) gray[y * w + x] = (x * 7 + y * 13) % 256;
+        orb.setup(w, h);
+        new Uint8Array(orb.memory.buffer, orb.inputPtr(), gray.length).set(gray);
+        const t0 = performance.now();
+        const n = orb.run();
+        report('syntheticKps', n);
+        report('syntheticMs', (performance.now() - t0).toFixed(1));
+        report('descLen', orb.descLen());
+        report('desc32bytes', Array.from(new Uint8Array(orb.memory.buffer, orb.descPtr(), Math.min(8, orb.descLen()))).join(','));
+        if (n > 0) report('kp0', [orb.kpX(0), orb.kpY(0), orb.kpSize(0), orb.kpAngle(0)].map((v) => (+v).toFixed(1)).join(','));
+      }
+
+      // 2. popcnt.wasm over HTTP: wasm scan must agree with the JS fallback
+      {
+        const res = await fetch('./build/popcnt.wasm?v=3');
+        if (!res.ok) throw new Error(`popcnt.wasm fetch ${res.status}`);
+        const { instance } = await WebAssembly.instantiate(await res.arrayBuffer(), {
+          env: { abort() { throw new Error('wasm abort'); }, trace() {}, seed: () => 123 },
+        });
+        const wasmScan = makeWasmScanPair(instance.exports);
+        let s = 42;
+        const rnd = (n) => ((s = (s * 1664525 + 1013904223) >>> 0), s % n);
+        const a = new Uint8Array(64), b = new Uint8Array(64);
+        for (let i = 0; i < 64; i++) { a[i] = rnd(256); b[i] = rnd(256); }
+        const js = scanPairJS(a, b);
+        const wm = wasmScan(a, b);
+        const same = js.bestD.every((v, i) => v === wm.bestD[i]) &&
+          js.bestIdx.every((v, i) => v === wm.bestIdx[i]) &&
+          js.hist.every((v, i) => v === wm.hist[i]);
+        report('popcntWasmMatch', same);
+      }
+
+      // 3. real demo pipeline: ImageDecoder → grayscale → OpenCV.js ORB
+      try {
+        const res = await fetch('./test_images/ukbench00000.jpg');
+        const dec = new ImageDecoder({ data: await res.arrayBuffer(), type: 'image/jpeg' });
+        await dec.tracks.ready;
+        const { image } = await dec.decode();
+        await image.prepareForRendering?.();
+        const bmp = await createImageBitmap(image);
+        const { gray, w, h } = rgbaToGray(bmp);
+        orb.setup(w, h);
+        new Uint8Array(orb.memory.buffer, orb.inputPtr(), gray.length).set(gray);
+        const t0 = performance.now();
+        const n = orb.run();
+        report('ukbenchKps', n);
+        report('ukbenchSize', `${w}x${h}`);
+        report('ukbenchMs', (performance.now() - t0).toFixed(1));
+        report('ukbenchDescLen', orb.descLen());
+      } catch (e) {
+        report('ukbenchError', String(e));
+      }
+    } catch (e) {
+      report('ERROR', String(e?.stack ?? e));
+    }
+
+    const pre = document.createElement('pre');
+    pre.id = 'result';
+    pre.textContent = out.join('\n');
+    document.body.prepend(pre);
+    document.title = 'ORBVERIFY ' + out.join(' | ');
+    document.getElementById('probe').textContent = out.join('\n');
+  </script>
+</body>
+</html>
